@@ -1,0 +1,286 @@
+---
+title: "MN Public Salary Data - Multilevel Models"
+subtitle: "Part 2: Varying intercepts"
+author: "Alison Link"
+output: html_notebook
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(broom)
+library(directlabels)
+
+# For non-Bayesian multilevel modeling
+#library(lme4)
+library(lmerTest) # use lmerTest, which is like lme4, but also provides p-values for fixed effects (albeit a somewhat controversial approach...)
+
+# For Bayesian multilevel modeling
+library(rstan)
+options(mc.cores = parallel::detectCores()) # Allows rstan to run on multiple cores
+rstan_options(auto_write = TRUE)
+library(rethinking) 
+
+# Packages for timing 
+library(beepr)
+library(tictoc)
+```
+
+
+Now that we're ready to launch into multilevel modeling, let's revisit the concept of "pooling".  In this example, we've been trying to estimate an Minnesota public employees's hourly compensation rates.  We can illustrate pooling at play by performing a simple thought experiment with this particular modeling task in mind.  Let's say, for example, that we want to throw an "employee fun day" for Minnesota state employees.  (Yay--they deserve it!)  While everyone's out having fun, we want to use that opportunity to get a "lay of the land" about how employees are compensated.  The goal is to arrange our employees in a way that makes it easy to see/understand meaningful patterns in their compensation rates.  (Note: In this example, we're pretending we don't have direct access to HR records about compensation rates--we need to deduce the trends from our observations during the "employee fun day".)
+
+One approach would be to invite everyone to one giant pool party, where everyone's forced to show up and swim together.  To accommodate this, you're going to need a pretty large pool, and you're going to throw your IT professionals right next to your corrections officers, and your nurses in next to your court clerks.  With this approach, you can still get a general sense of the overall population trends, but this makes it hard to sort out the nuanced distinctions between these groups' compensation levels.  This concept is called **complete pooling**.
+
+![crowded pool](img/pool.jpg)
+
+Another approach would be to go to a different extreme: instead of throwing a pool party, we could throw a bunch of separate office parties.  This concept is called **no pooling**.  At each of these parties, everyone will celebrate only with other members of their same job class, and no one is allowed to mingle with anyone outside of their immediate group.  This would make the distinctions between groups very clear.  Unfortunately, it would be both cumbersome and potentially misleading to try to deduce broader population trends from all of these separate office parties.  For example, the state has only one "Judicial Mail Clerk", one "Music Therapist", and one "Seed Potato Specialist".  It would be tricky to try to visit each and every one of these individuals at their one-off office parties!  Beyond that, you could run into idiosyncratic situations that could skew your perspective.  For example, you might discover that Minnesota's seed potato specialist just happens to be the world's leading expert on seed potatoes, and is compensated accordingly.  This is great news for Minnesota!  But you wouldn't want to let this outlier be the only input into your compensation model for Minnesota seed potato specialists into the future.  Because, when the current expert retires and the _next_ seed potato specialist is hired, they aren't likely to be nearly as qualified--or as well compensated.
+
+![office party](img/office_party.jpg)
+
+The final approach--the **partial pooling** approach--is like celebrating our employee fun day at a waterpark.  At a waterpark, there's plenty of room to spread out and cluster.  You'll find that employees naturally tend to mingle with their officemates across different areas of the waterpark.  If you were to walk around to the different employee clusters, you could easily take a quick "straw poll" in each group and get a sense of how much their compensation rates vary within the cluster.  And after you have sampled several clusters, you could start to get a good feel for how compensation rates vary _across_ clusters.  By the end, you'd have a pretty reasonable estimate of the compensation trends--both for the population as a whole, and for each cluster.
+
+![waterpark](img/waterpark.jpg)
+
+
+Multilevel modeling is like a day at the waterpark.  (See: McElreath, p. 408 for a more complete discussion of "pooling" concepts.)  Let's dive in!
+
+
+## Run a (non-Bayesian) varying intercepts model (`lme4`)
+
+Let's start from the key assumption that much of the difference in compensation rates likely has to do with which job each employee is performing.  We certainly don't expect each job to have the same starting salary (intercept), so let's account for that by fitting a multilevel model where the intercept is allowed to vary based on job class.
+
+When running a varying intercepts model using the `lme4` package, you'll use model formula syntax that is relatively similar to what you're probably already used to from other R packages.  Looking at the formula below, you'll see that the one difference is the `(1|JOB_FACTOR)` component of the model.  The `1|` indicates that we want to add a varying _intercept_, with `|JOB_FACTOR` as the grouping across which we want to allow the intercepts to vary.
+
+```{r model_var_int_lmer}
+model2_lmer <- lmer(COMP_RATE_STND_HOURLY ~ YRS_SINCE_ORIGINAL_HIRE + (1|JOB_FACTOR), # model formula
+               data = hr_2019_top_25_job_classes, 
+               REML = FALSE) # set REML = FALSE to use log-likelihood optimization and get AIC/deviance values in output
+
+summary(model2_lmer)
+```
+
+The model summary separates the explained variance into two concepts: **fixed effects** vs. **random effects**.  Looking first at the "fixed effects", we notice that the estimate for the intercept is ~\$27, representing the population mean hourly compensation rate.  When we look at the number of years since original hire (YRS_SINCE_ORIGINAL_HIRE), the estimate for the slope of is 0.167.  This indicates that the population average increase in hourly compensation rate for each additional year worked at the state is ~16-17 cents per year.  Now, looking at the "random effects", we see that the job class (JOB_FACTOR) accounts for _a lot_ of the additional variance in hourly compensation rates.  There is also still some residual variance left over (~7.59) that is not explained by the model.
+
+And what exactly does this look like?  Here's a visual to try to illustrate what it's doing.  The slope of the relationship between years worked and hourly compensation rate is still fixed to be the same across all job classes, but now the different job classes each have their own separate intercepts:
+
+```{r viz_var_int}
+rand <- as.data.frame(ranef(model2_lmer))
+
+coeff_df <- rand %>%
+  mutate(
+    pop_intercept = fixef(model2_lmer)['(Intercept)'],
+    pop_slope = fixef(model2_lmer)['YRS_SINCE_ORIGINAL_HIRE']
+  ) 
+
+x <- as.data.frame(seq(0, 30, 1)) # set up x axis data to visualize 30 years
+names(x) <- "YRS_SINCE_ORIGINAL_HIRE"
+
+viz_df <- crossing(coeff_df, x)
+
+viz_df <- viz_df %>%
+  mutate(
+    middle = pop_intercept + condval + YRS_SINCE_ORIGINAL_HIRE * pop_slope,
+    lower_bound = pop_intercept + condval + YRS_SINCE_ORIGINAL_HIRE * pop_slope + condsd * 2, # 95% CI
+    upper_bound = pop_intercept + condval + YRS_SINCE_ORIGINAL_HIRE * pop_slope - condsd * 2
+  )
+
+ggplot(viz_df, aes(x=YRS_SINCE_ORIGINAL_HIRE, y=middle, col=grp, label=grp)) +
+  geom_smooth(aes(ymin = lower_bound, ymax = upper_bound), stat = "identity") +
+  geom_dl(aes(label=grp, color=grp), method = list("last.points")) +
+  xlim(0, 50) +
+  ylim(0, 60) +
+  theme(legend.position = "none")
+```
+
+
+### Compare varying intercepts approach to running a `glm` with a factor variable
+
+If you're like me, you may be saying to yourself at this point: "No big deal! This doesn't really seem any different from simply running a basic linear model and adding the job class as a factor variable."  But as it turns out, our multilevel model _is_ a little different.  Because the varying intercepts model we fit above is a "waterpark party".  (Remember our 'pooling' metaphor?)  And fitting a glm model with job class as a factor variable is like throwing an "office party".  
+
+To help illustrate this difference, we're going to need to expand the dataset a bit.  In addition to the "top 25" job classes we've been looking at so far, we're going to add an additional set of job classes that are much smaller.  Each of these job classes contain fewer than 5 employees, and we will include them in order to be able to illustrate the concept of "shrinkage":
+
+```{r filter_job_classes_plus}
+# Add some additional, smaller job classes for illustration purposes later on
+top_25_plus_some_smaller_job_classes <- c(top_25_job_classes, "Public Defense Data Entry Cl", "Jud Library Asst I", "Service Worker", "Peer Specialist", "Pollution Cont Technician", "Asst Dir Mn State Lottery", "Asst Commr Pollution Control", "Epidemiologist Program Manager", "Governor")
+
+hr_2019_top_25_job_classes_plus <- hr_2019 %>%
+  filter(JOB_TITLE %in% top_25_plus_some_smaller_job_classes)
+
+hr_2019_top_25_job_classes_plus$JOB_FACTOR <- relevel(as.factor(hr_2019_top_25_job_classes_plus$JOB_TITLE), ref="State Patrol Trooper")
+```
+
+Now, let's run two models on this expanded dataset--one multilevel model using `lmer` and one linear model using `glm`:
+
+```{r run_lmer_glm_compare}
+model2_lmer_top25plus <- lmer(COMP_RATE_STND_HOURLY ~ YRS_SINCE_ORIGINAL_HIRE + (1|JOB_FACTOR), data = hr_2019_top_25_job_classes_plus, REML = FALSE)
+
+model2_glm_top25plus <- glm(COMP_RATE_STND_HOURLY ~ YRS_SINCE_ORIGINAL_HIRE + JOB_FACTOR, data = hr_2019_top_25_job_classes_plus, family = "gaussian")
+```
+
+Now, we can do a little work to visualize the coefficients from each model in a side-by-side comparison.  You'll notice that, for the 25 larger job classes we examined, there doesn't seem to be much difference in the coefficient estimates.  Where things start to matter is for the _smaller_ job classes we included in the model.  For these job classes, where we had relatively fewer individuals in each class, the varying intercepts model is **shrinking** their coefficient estimates towards the middle.  It's using information from the "grand" population mean to adjust our coefficient estimates for these smaller groups to make them less extreme!  This phenomenon of **shrinking** parameter estimates towards the population mean is a built-in benefit of multilevel modeling.  The model is performing a delicate balancing act between overall population trends and the variance within and across groups.  For smaller groups, the "grand mean" of the population plays a bigger role in the final coefficient estimates than it does for larger groups.
+
+```{r extract_coeffs_lmer_glm, warning=FALSE, message=FALSE}
+# Extract the group coefficients from the varying intercepts model
+group_coeffs_lmer <- as.data.frame(ranef(model2_lmer_top25plus)) %>%
+  rename(lmer_coeff = condval)
+
+# Extract and clean the group coefficients from the glm model
+group_coeffs_glm <- as.data.frame(model2_glm_top25plus$coefficients)
+names(group_coeffs_glm) <- "Coefficient"
+
+group_coeffs_glm <- group_coeffs_glm %>% 
+  rownames_to_column("grp") %>% 
+  filter(grp != c('(Intercept)', 'YRS_SINCE_ORIGINAL_HIRE')) %>%
+  mutate(grp = gsub("JOB_FACTOR", "", grp))
+
+group_coeffs_glm <- rbind(group_coeffs_glm, list("State Patrol Trooper", 0.0))
+
+group_coeffs_glm <- group_coeffs_glm %>%
+  mutate(glm_coeff = Coefficient - mean(Coefficient)) # center the coefficients from the glm at zero (instead of around "State Patrol Trooper"), so we can compare them to the how the random effects coefficients (which are zero-centered by default)
+```
+
+```{r viz_coeff_shrinkage, warning=FALSE, message=FALSE, fig.width=5, fig.height=5, fig.asp=0.6}
+inner_join(group_coeffs_lmer, group_coeffs_glm, by=c("grp")) %>%
+  ggplot(., aes(y=reorder(grp, lmer_coeff), lmer_coeff = lmer_coeff, glm_coeff = glm_coeff)) +
+  geom_point(aes(x=glm_coeff, col="glm_coeff")) +
+  geom_point(aes(x=lmer_coeff, col="lmer_coeff")) +
+  scale_color_manual(name = "", values = c("#fdb924", "#8b2323")) +
+  xlab("coefficients") +
+  ylab("job class")
+```
+
+
+## Run a Bayesian varying intercepts model (`rethinking`)
+
+Okay, now it's time to get Bayesian.  Let's return to the original dataset--the top 25 job classes--and we'll tackle the exact same varying intercepts modeling task as above.  The only difference this time is that we get to set some priors!  To create a varying intercepts formula, we need to add a term--`a[JOB_INDEX]`--to represent these intercepts, which are allowed to vary based on the JOB_INDEX value.  We also add one additional prior, `a_sigma`, to represent our expectations about the distribution for the standard deviation of the mean hourly starting salary across groups.
+
+Note that we're switching to using the `JOB_INDEX` version of the variable, rather than the `JOB_FACTOR` version.  This is because `rethinking` suggests that index variables are preferable to factors for its Bayesian fitting approach, because an index variable allows all distinct groups present in the variable to be assigned an explicit prior (McElreath, p. 155).
+
+```{r model_var_int_bayes}
+fit_model2_bayes <- function(){
+  
+  # Prep the data columns we want to pass the the model
+  dat_list <- list(
+    COMP_RATE_STND_HOURLY = hr_2019_top_25_job_classes$COMP_RATE_STND_HOURLY,
+    JOB_INDEX = hr_2019_top_25_job_classes$JOB_INDEX,
+    YRS_SINCE_ORIGINAL_HIRE = hr_2019_top_25_job_classes$YRS_SINCE_ORIGINAL_HIRE
+  )
+  
+  tic("Running model 2 Bayesian")
+  model2_bayes <- ulam(
+    alist(
+      COMP_RATE_STND_HOURLY ~ dnorm( mu , sigma ),
+      mu <- Intercept + a[JOB_INDEX] + b_YRS_SINCE_ORIGINAL_HIRE*YRS_SINCE_ORIGINAL_HIRE,
+      
+      Intercept ~ dnorm(30, 10),
+      sigma ~ dcauchy(0, 20),
+      
+      # fixed effects priors
+      b_YRS_SINCE_ORIGINAL_HIRE ~ dnorm(0.675, 1.5),
+      
+      # multilevel adaptive priors
+      a[JOB_INDEX] ~ dnorm(0, a_sigma), # prior for mean hourly starting salary of each group (after accounting for the "grand intercept" for the population as a whole): a normal distribution centered around 0
+      
+      # hyper-priors
+      a_sigma ~ dcauchy(0, 50) # prior for the standard deviation of the mean hourly starting salary across groups
+    ),
+    data = dat_list, 
+    chains = 1,
+    log_lik = TRUE
+  )
+  
+  toc() # stop the timer
+  beepr::beep() # emit a beep so we can come back from whatever else we were doing
+  
+  saveRDS(model2_bayes, "./models/model2_bayes.rds")
+  return(model2_bayes)
+}
+
+# If we have already fit the model and have saved the results to disk, do not re-fit it! (This takes a long time.)
+# Simply load the model from disk...
+if(file.exists("./models/model2_bayes.rds")) {
+  cat("Model has already been fit!  Loading results from disk.")
+  model2_bayes <- readRDS("./models/model2_bayes.rds")
+} else { 
+  # If we have not yet fit the model, go ahead and fit it and save the results to disk
+  cat("Model has not yet been fit. Fitting model now. Please be patient.")
+  model2_bayes <- fit_model2_bayes()
+}
+```
+
+We can view the model results:
+
+```{r}
+precis(model2_bayes, depth=2)
+plot(precis(model2_bayes, depth=2), main="All Posterior Params")
+plot(precis(model2_bayes, depth=2, pars="a"), labels=JOB_LABELS, main="Job Intercepts")
+```
+
+Now, for the sake of illustration, let's run the same model again--this time with a more extreme prior for the standard deviation across job classes:
+
+```{r model_var_int_bayes_extreme_priors}
+fit_model2_bayes_extreme_priors <- function() {
+
+  # Prep the data columns we want to pass the the model
+  dat_list <- list(
+    COMP_RATE_STND_HOURLY = hr_2019_top_25_job_classes$COMP_RATE_STND_HOURLY,
+    JOB_INDEX = hr_2019_top_25_job_classes$JOB_INDEX,
+    YRS_SINCE_ORIGINAL_HIRE = hr_2019_top_25_job_classes$YRS_SINCE_ORIGINAL_HIRE
+  )
+  
+  tic("Running model 2 Bayesian w/ extreme priors")
+  model2_bayes_extreme_priors <- ulam(
+    alist(
+      COMP_RATE_STND_HOURLY ~ dnorm( mu , sigma ),
+      mu <- Intercept + a[JOB_INDEX] + b_YRS_SINCE_ORIGINAL_HIRE*YRS_SINCE_ORIGINAL_HIRE,
+      
+      Intercept ~ dnorm(30, 10),
+      sigma ~ dcauchy(0, 30),
+      
+      # fixed effects priors
+      b_YRS_SINCE_ORIGINAL_HIRE ~ dnorm(0.675, 1.5),
+      
+      # multilevel adaptive priors
+      a[JOB_INDEX] ~ dnorm(0, a_sigma),
+      
+      # hyper-priors
+      a_sigma ~ dcauchy(0, 0.00000000000000001) # <-- make this prior more extreme
+    ),
+    data = dat_list, 
+    chains = 1,
+    log_lik = TRUE
+  )
+  
+  toc() # stop the timer
+  beepr::beep() # emit a beep so we can come back from whatever else we were doing
+  
+  saveRDS(model2_bayes_extreme_priors, "./models/model2_bayes_extreme_priors.rds")
+  return(model2_bayes_extreme_priors)
+}
+  
+if(file.exists("./models/model2_bayes_extreme_priors.rds")) {
+  cat("Model has already been fit!  Loading results from disk.")
+  model2_bayes_extreme_priors <- readRDS("./models/model2_bayes_extreme_priors.rds")
+} else { 
+  cat("Model has not yet been fit. Fitting model now. Please be patient.")
+  model2_bayes_extreme_priors <- fit_model2_bayes_extreme_priors()
+}
+```
+
+And view the model results:
+
+```{r}
+precis(model2_bayes_extreme_priors, depth=2)
+plot(precis(model2_bayes_extreme_priors, depth=2), main="All Posterior Params")
+plot(precis(model2_bayes_extreme_priors, depth=2, pars="a"), labels=JOB_LABELS, main="Job Intercepts")
+```
+
+
+### Compare the Bayesian models
+
+You'll notice that the two Bayesian models here have different pWAIC values.  This is because the pWAIC value value also takes into account the regularizing work performed by the prior to shrink all of our group intercepts towards the mean (McElreath, p. 404).  More regularization results in a lower effective parameter value.  In the model with extreme priors, we somewhat thwarted the regularizing abilities of the model.  The intercepts weren't able to be shrunk as much toward the mean, and as a result, the number of effective parameters increased slightly.
+
+```{r compare_bayes_models}
+compare(model2_bayes, model2_bayes_extreme_priors)
+```
+
+

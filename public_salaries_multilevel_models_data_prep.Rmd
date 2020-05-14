@@ -1,0 +1,203 @@
+---
+title: "MN Public Salary Data - Multilevel Models"
+subtitle: "Data Prep"
+author: Alison Link
+output: html_notebook
+---
+
+
+## Load packages
+
+```{r load_libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(skimr)
+
+# Packages for manipulating name strings and guessing genders based on names
+library(tm)
+library(gender)
+# Note: Need to install the 'genderdata' package from the ROpenSci repository -- not available on CRAN
+# install.packages("genderdata", repos = "http://packages.ropensci.org") 
+library(genderdata)
+
+# Packages for timing 
+library(beepr)
+library(tictoc)
+```
+
+
+## Read data
+
+```{r read_data}
+hr_2019 <- read_excel("./data/fiscal-year-2019.xlsx", sheet="FY19 HR INFO", na = "'', '-'")
+
+# Convert these two columns to Date type files, instead of the strange character fields
+# that Excel date columns sometimes get parsed as
+hr_2019$ORIGINAL_HIRE_DATE <- as.Date(as.numeric(hr_2019$ORIGINAL_HIRE_DATE), origin = "1899-12-30")
+hr_2019$LAST_HIRE_DATE <- as.Date(as.numeric(hr_2019$LAST_HIRE_DATE), origin = "1899-12-30")
+
+# This column seems to import as POSIXct by default--not sure why it's different from the
+# other two. The only thing we have to do is convert it to an R Date type.
+hr_2019$JOB_ENTRY_DATE <- as.Date(hr_2019$JOB_ENTRY_DATE)
+
+#earnings_2019 <- read_excel("./data/fiscal-year-2019.xlsx", sheet="FY19 EARNINGS")
+```
+
+
+## Data transformations
+
+Salaries are listed on either a biweekly or hourly basis: `table(hr_2019$COMP_FREQUENCY_DESC)`.  To be able to compare across salary types, we can standardize all salaries into an hourly rate.  This will become our main response variable:
+
+```{r transform_comp_rate}
+hr_2019 <- hr_2019 %>% 
+  mutate(COMP_RATE_STND_HOURLY = ifelse(COMP_FREQUENCY_CODE == 'H', COMPENSATION_RATE, COMPENSATION_RATE / 80))
+```
+
+We can convert the date variables to a format that makes them slightly more interpretable. We'll use the end of the calendar year (December 31, 2019) as a reference time frame:
+
+```{r transform_years_vars}
+hr_2019 <- hr_2019 %>%
+  mutate(YRS_SINCE_ORIGINAL_HIRE = as.numeric((as.Date('2019-12-31') - ORIGINAL_HIRE_DATE)) / 365,
+         YRS_SINCE_LAST_HIRE = as.numeric((as.Date('2019-12-31') - LAST_HIRE_DATE)) / 365,
+         YRS_SINCE_JOB_ENTRY = as.numeric((as.Date('2019-12-31') - JOB_ENTRY_DATE)) / 365)
+```
+
+Clean up the postal codes so they're all only 5 digits long:
+
+```{r transform_zip_code}
+hr_2019 <- hr_2019 %>%
+  mutate(LOCATION_POSTAL_CODE_CLEANED = substr(LOCATION_POSTAL_CODE, 1, 5))
+```
+
+
+## Clean duplicates
+
+There is one `TEMPORARY_ID` value that appears to be shared across two different individuals. Let's create a new `UNIQUE_ID` field that contains the `TEMPORARY_ID` plus the first letter of the person's last name to create field that is truly distinct, in case we need to count or group by this field at some point:
+
+```{r clean_dupes}
+hr_2019 %>% group_by(TEMPORARY_ID) %>% 
+  summarise(distinct_names = length(unique(EMPLOYEE_NAME))) %>% 
+  filter(distinct_names > 1)
+
+hr_2019$UNIQUE_ID <- paste(hr_2019$TEMPORARY_ID, substring(hr_2019$EMPLOYEE_NAME, 1, 1), sep="")
+```
+
+
+## Deal with bad/incomplete data
+
+We have a lot of roles that have a `COMPENSATION_RATE` value of '0'.  When we examine these more closely broken down by agency, we see that most of these are concentrated in 'MN St Colleges & Universities', where ~40% of roles have a compensation rate of '0' listed!
+
+```{r}
+hr_2019 %>% group_by(AGENCY_NAME) %>% 
+  summarise(pct_of_roles_where_comp_rate_equals_zero =
+              sum(ifelse(COMPENSATION_RATE == 0, 1, 0)) / n() ) %>%
+  filter(pct_of_roles_where_comp_rate_equals_zero > 0) %>%
+  arrange(desc(pct_of_roles_where_comp_rate_equals_zero))
+```
+
+This is profound enough that it seems likely to skew any conclusions we would make about this agency, so to keep thing simple for now, let's filter this agency out of the rest of the analysis:
+
+```{r filter_mnstate}
+hr_2019 <- hr_2019 %>% filter(AGENCY_NAME != 'MN St Colleges & Universities')
+```
+
+
+The `skim()` function shows how many missing values we have within each column, along with some other helpful information.  It looks like the `LAST_HIRE_DATE` is often missing, but we have pretty consistent data for pretty much everything else:
+
+```{r skim}
+skim(hr_2019)
+```
+
+Let's filter the dataset to drop the `LAST_HIRE_DATE` columns, where we see a high number of NAs.  Then, we can scan across the remaining columns and filter the dataset to include all rows where we have complete cases for the remaining columns.  Note: Normally we would want to be a little more careful about filtering out incomplete cases before inspecting them more closely, but since our goal is to learn multilevel modeling without getting tripped up by errors due to missing data, we'll consider this a "didactic shortcut".
+
+```{r filter_complete_cases}
+hr_2019 <- hr_2019 %>% select(-LAST_HIRE_DATE, -YRS_SINCE_LAST_HIRE)
+
+hr_2019 <- hr_2019 %>% filter(complete.cases(.))
+```
+
+Here's how we've narrowed down the dataset after cleaning:
+
+**74,304** (all roles, unfiltered) > 
+**47,759** (after filtering out "MN St Colleges & Universities") > 
+**47,732** (after filtering out incomplete cases)
+
+
+## Guess gender
+
+The public employees dataset doesn't come with gender as a delivered field.  Because we are interested in seeing if there are any gender-related trends around compensation, the best we will be able to do is guess the gender of each employee based on their first name.  The `gender` and `genderdata` packages can help out with this.  These packages leverage information from the Social Security Administration on which names were most frequently associated with which gender at different eras in history.  
+
+First, we need to extract the first name and last name into separate columns:
+
+```{r transform_names}
+hr_2019 <- hr_2019 %>% 
+  mutate(LAST_NAME = removePunctuation(str_extract(EMPLOYEE_NAME, "^(.+?),")),
+         FIRST_NAME = removePunctuation(str_extract(EMPLOYEE_NAME, ",([A-Z|a-z]+)")))
+```
+
+Next, we define a get_gender() function that creates a mapping from each first name in the dataset to the most likely gender corresponding to that first name.  This function takes a _long_ time to run, so we'll make sure to `distinct()` the set of names before passing them through to the function.  We'll also add some code that times how long it takes the function to run and emits a "beep" when it's finished.  (This is a convenient time to go take a coffee break!)  When the results are ready, we'll save them to a .csv file that we can use from session to session, so we don't have to run this function more than once.
+
+```{r get_gender, eval = FALSE}
+get_gender <- function(first_name) {
+  results_df <- gender(as.character(first_name), method = "ssa", years = c(1950, 2012))
+  gender_estimate <- as.character(results_df$gender)
+  
+  # If we didn't get a valid result, return 'unknown', otherwise return the result
+  if(length(gender_estimate) == 0) {
+    return("unknown")
+  } else {
+    return(results_df$gender)
+  }
+}
+
+# Get all distinct first names and guess their genders (so we can join this back to the HR data after making the guesses)
+# Runtime: ~22 min
+tic("guessing names") 
+gender_guesses <- hr_2019 %>%
+  #filter(BARGAINING_UNIT_NAME == "Corrections Officers") %>% # test on a single bargaining unit to see if it's working
+  select(FIRST_NAME) %>%
+  distinct(FIRST_NAME) %>%
+  mutate(GENDER = map_chr(FIRST_NAME, get_gender))
+toc()
+
+beepr::beep()
+
+write.csv(gender_guesses, file="./data/gender_guesses.csv", row.names = FALSE)
+```
+
+
+Join the gender data back to the original dataset: 
+
+```{r transform_join_gender}
+gender_guesses <- read.csv("./data/gender_guesses_backup.csv", header=TRUE)
+
+hr_2019 <- left_join(hr_2019, gender_guesses, by=c("FIRST_NAME"))
+```
+
+
+***
+
+
+## Additional notes on the gender guessing process...
+
+Here are what the results from the `gender` package look like when it guesses the gender based on a name. You can see that it's guessing the gender based  on a simple "maximum likelihood" assessment of whether the name occurs more frequently in males vs. females based on the U.S. Social Security Administration's baby name data.  For now, we'll use the guesses "as is", but more sophisticated analyses may want to figure out ways to adjust for the level of uncertainty present in these guesses:
+
+```{r}
+gender("River", method = "ssa", years = c(1950, 2012))
+```
+
+Just for fun...what are the most popular names?
+
+```{r}
+hr_2019 %>% group_by(FIRST_NAME) %>% 
+  summarise(count = length(unique(TEMPORARY_ID))) %>% 
+  arrange(desc(count)) %>%
+  top_n(10)
+```
+
+
+Let's inspect the names for which our gender package wasn't able to make a gender guess.  It looks like we're getting more 'unknown' values for names that may be more frequently associated with individuals with an immigrant background, or whose families have chosen to give them names that are outside of the American mainstream.  In fact, this 'unknown' appears like it could act as a pretty strong proxy for something _other_ than gender.  We need to proceed with caution!  **This is a source of bias, and we need to take it into account when performing gender-based analyses with this column moving forward.**
+
+```{r}
+gender_guesses %>% filter(GENDER == 'unknown') %>% select(FIRST_NAME) %>% top_n(10)
+```

@@ -1,0 +1,60 @@
+---
+title: "MN Public Salary Data - Multilevel Models"
+subtitle: "References & Acknowledgements"
+author: "Alison Link"
+output: html_notebook
+---
+
+## References
+
+### Data
+
+_Minnesota Management and Budget_, _Transparency MN_ (2020). ["Payroll Data"](https://mn.gov/mmb/transparency-mn/payrolldata.jsp). <-- Downloadable data files available here!  (This tutorial uses the 2019 file.)
+
+
+### Learning the statistical theory
+
+McElreath, R. (2020). [_Statistical Rethinking: A Bayesian Course with Examples in R and Stan_, 2nd Ed](https://www.routledge.com/Statistical-Rethinking-A-Bayesian-Course-with-Examples-in-R-and-STAN/McElreath/p/book/9780367139919). CRC Press. 
+
+McElreath, R. (2019). [Statistical Rethinking Winter 2019](https://www.youtube.com/playlist?list=PLDcUM9US4XdNM4Edgs7weiyIguLSToZRI) [You Tube]. Lectures to focus on:
+
+- [Lecture 15 - "Models with Memory"](https://www.youtube.com/watch?v=AALYPv5xSos&list=PLDcUM9US4XdNM4Edgs7weiyIguLSToZRI&index=15)
+
+- [Lecture 16 - "Multilevel Models 2"](https://www.youtube.com/watch?v=ZG3Oe35R5sY&list=PLDcUM9US4XdNM4Edgs7weiyIguLSToZRI&index=16)
+
+- [Lecture 17 - "Adventures in Covariance"](https://www.youtube.com/watch?v=yfXpjmWgyXU&list=PLDcUM9US4XdNM4Edgs7weiyIguLSToZRI&index=17)
+
+- [Lecture 18 - "Further Adventures in Covariance"](https://www.youtube.com/watch?v=e5cgiAGBKzI&list=PLDcUM9US4XdNM4Edgs7weiyIguLSToZRI&index=18)
+
+Erickson, R. _Data Camp_. ["Hierarchical and Mixed Effects Models in R"](https://learn.datacamp.com/courses/hierarchical-and-mixed-effects-models-in-r).
+
+
+### Learning the R packages
+
+McElreath, R. ["Rethinking: An R package for fitting and manipulating Bayesian models (Version 1.56)"](http://xcelab.net/R/rethinking_package.pdf).
+
+Bates, D., Mächler, M., Bolker, B., Walker, S. C. (2014). ["Fitting linear mixed-effects models using lme4"](https://arxiv.org/pdf/1406.5823.pdf).
+
+Blisset, R. (2017). ["Multilevel Modeling in R"](https://rpubs.com/rslbliss/r_mlm_ws).
+
+[`gender` package vignette](https://cran.r-project.org/web/packages/gender/gender.pdf)
+
+
+### Smattering of helpful "help" articles
+
+https://stats.stackexchange.com/questions/275103/visualizing-a-multilevel-model-hlm-in-ggplot2
+
+https://stats.stackexchange.com/questions/48671/what-is-restricted-maximum-likelihood-and-when-should-it-be-used
+
+https://stats.stackexchange.com/questions/242109/model-failed-to-converge-warning-in-lmer/243225
+
+https://github.com/ropensci/drat/issues/6
+
+https://www.researchgate.net/post/What_does_singular_fit_mean_in_Mixed_Models
+
+***
+
+## Acknowledgements
+
+Thanks to Anne Eaton for her sharing her statistical prowess, and for being willing to wake up early on a Saturday morning to provide valuable feedback to help improve this tutorial.  And thanks to Nate Meath, who also helped kick around ideas for this tutorial and who acted as a valuable sounding board for thinking more deeply about the math.
+

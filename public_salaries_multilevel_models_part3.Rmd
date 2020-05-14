@@ -1,0 +1,192 @@
+---
+title: "MN Public Salary Data - Multilevel Models"
+subtitle: "Part 3: Varying slopes"
+author: "Alison Link"
+output: html_notebook
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(broom)
+library(directlabels)
+
+# For non-Bayesian multilevel modeling
+#library(lme4)
+library(lmerTest) # use lmerTest, which is like lme4, but also provides p-values for fixed effects (albeit a somewhat controversial approach...)
+
+# For Bayesian multilevel modeling
+library(rstan)
+options(mc.cores = parallel::detectCores()) # Allows rstan to run on multiple cores
+rstan_options(auto_write = TRUE)
+library(rethinking) 
+```
+
+Fitting varying intercepts was fun--but we don't have to stop there!  Multilevel models are highly flexible, and there are lots of different structures you can use when choosing which parameters you want to add "varying" effects for.  As a helpful rule of thumb:
+
+> "Any batch of parameters with _exchangeable_ index values can and probably should be pooled. Exchangeable just means the index values have no true ordering, because they are arbitrary lables. There's nothing special about intercepts; slopes can also vary by unit in the data, and pooling information among them makes better use of the data." ~ McElreath, p. 435
+
+
+## Run a (non-Bayesian) varying intercepts + varying slopes model (`lme4`)
+
+Next, for example, we may be interested in exploring the idea that women's salaries could be _increasing_ at a different rate than men's salaries during their tenure as state employees.  We could theorize that men may advocate more strongly for themselves and their career advancement, resulting in a faster increase in their hourly wages for each additional year served, compared to their female counterparts.  Or, we could theorize that women's work is recognized to be consistently excellent, resulting in more frequent recognition from their superiors in the form of higher wage increases each year than their male counterparts.  These kinds of relationships--where we expect not just the intercepts, but also the rate of change to vary across groups--requires a varying _slopes_ model.
+
+Before we get started, let's consider the quality of our gender data for a moment.  During the data prep phase, we weren't able to effectively guess the genders for everyone in the dataset, which resulted in individuals being labeled as 'unknown' for their gender value.  This particular label exhibits an important bias, since it represents a group of employees who have names that may be more frequently associated with individuals with an immigrant background, or whose families have chosen to give them names that are outside of the American mainstream.  At this point, we should be concerned about forging ahead, since this seems to suggest a systematic bias introduced into the data by the gender guessing process!  What we are actually measuring with this "gender" variable is a proxy for something different from "gender" alone--it also seems to reflect some potential information about employees' ethnic or family background in a way that will confuse our analysis.  Because we still want to understand more about multilevel modeling, we will proceed with the analysis for didactic purposes only, but **we should not attempt to draw any "real" conclusions from this point onwards!**
+
+```{r, message=FALSE}
+hr_2019_top_25_job_classes %>% 
+  filter(GENDER == 'unknown') %>%
+  group_by(FIRST_NAME) %>%
+  summarise(count_of_employees = n()) %>%
+  arrange(desc(count_of_employees)) %>%
+  top_n(10)
+```
+Convert this "gender" variable to both a factor and an index:
+
+```{r}
+hr_2019_top_25_job_classes$GENDER_FACTOR <- relevel(as.factor(hr_2019_top_25_job_classes$GENDER), ref="male")
+hr_2019_top_25_job_classes$GENDER_INDEX <- as.integer(recode(hr_2019_top_25_job_classes$GENDER, male = '1', female = '2', unknown = '3'))
+
+GENDER_LABELS <- levels(hr_2019_top_25_job_classes$GENDER_FACTOR)
+```
+
+Then we can add this as a "varying slopes" variable and run a new multilevel model.  We do this by adding the expression `(YRS_SINCE_ORIGINAL_HIRE|GENDER_FACTOR)` to the model formula. By default, this adds two new parameters to the model in order to estimate: 1) varying intercepts for each of the gender values, and 2) varying slopes that describe an offset, broken down by gender, from the YRS_SINCE_ORIGINAL_HIRE beta coefficient estimate.  _Note:_ If we wanted to add to add _only_ the varying slope and _not_ an additional group of varying intercepst for gender, we could use `(0 + YRS_SINCE_ORIGINAL_HIRE|GENDER_FACTOR)` the formula syntax.  That would tell lmer _not_ to fit an intercept estimate for the related grouping variable.
+ 
+```{r model_var_int_var_slope_lmer}
+model3_lmer <- lmer(COMP_RATE_STND_HOURLY ~ YRS_SINCE_ORIGINAL_HIRE + (1|JOB_FACTOR) + (YRS_SINCE_ORIGINAL_HIRE|GENDER_FACTOR), 
+                    data = hr_2019_top_25_job_classes, REML = FALSE)
+
+options(scipen=999)
+summary(model3_lmer)
+```
+
+The model summary reveals that the `GENDER_FACTOR` variable adds very little, if anything, to the model.  The AIC for this model is _slightly_ lower (aka "better") than the AIC for the AIC for the model that contained only `JOB_FACTOR` as a varying intercept.  But the contribution seems minimal.  When we run the Bayesian model below, we'll examine the credible intervals for these gender-related intercept and slope parameters a bit more closely, but for now it's safe to say that the `GENDER_FACTOR` doesn't add anything exciting here.  Which is a good thing--we don't actually _want_ to see gender playing a significant role in compensation patterns for state employees!
+
+Just for illustrative purposes, what does this look like?  The structure of the model is getting pretty complex now, so we'll filter it down to show only a few job classes at a time to try to illustrate.  The model now contains separate intercepts for each job class _and_ for each gender value.  The slope of the relationship between years worked and hourly compensation rate is now variable by gender, so we should see that the lines now have slightly different slopes across gender values.  In the plot below, the varying slopes by gender are easy to spot.  The varying intercepts by gender are also in there--they're just too minuscule to see!
+
+```{r}
+rand <- as.data.frame(ranef(model3_lmer))
+
+gender_coeff_df <- rand %>%
+  filter(grpvar == 'GENDER_FACTOR') %>%
+  mutate(term = recode(term, `(Intercept)` = 'intercept_gender', `YRS_SINCE_ORIGINAL_HIRE` = 'slope_gender')) %>%
+  select(-grpvar, -condsd) %>%
+  spread(term, condval)
+
+job_coeff_df <- rand %>%
+  filter(grpvar == 'JOB_FACTOR') %>%
+  mutate(term = recode(term, `(Intercept)` = 'intercept_job')) %>%
+  select(-grpvar, -condsd) %>%
+  spread(term, condval)
+  
+x <- as.data.frame(seq(0, 30, 1)) # set up x axis data to visualize 30 years
+names(x) <- "YRS_SINCE_ORIGINAL_HIRE"
+
+j <- as.data.frame(c('Laborer General', 'Registered Nurse', 'Transp Specialist', 'Corr Officer 2'))
+names(j) <- "JOB_FACTOR"
+
+z <- as.data.frame(c('male', 'female', 'unknown'))
+names(z) <- "GENDER_FACTOR"
+
+viz_df <- crossing(x, j, z)
+
+viz_df <- inner_join(viz_df, gender_coeff_df, by=c('GENDER_FACTOR' = 'grp')) %>%
+  inner_join(., job_coeff_df, by=c('JOB_FACTOR' = 'grp')) %>%
+  mutate(
+    intercept_pop = fixef(model2_lmer)['(Intercept)'],
+    slope_pop = fixef(model2_lmer)['YRS_SINCE_ORIGINAL_HIRE']
+  ) %>%
+  mutate(salary_est = intercept_pop + intercept_job + intercept_gender + YRS_SINCE_ORIGINAL_HIRE * (slope_pop + slope_gender))
+
+ggplot(viz_df, aes(x=YRS_SINCE_ORIGINAL_HIRE, y=salary_est, col=JOB_FACTOR, grp=GENDER_FACTOR, label=GENDER_FACTOR)) +
+  geom_line(aes(linetype=GENDER_FACTOR)) +
+  xlim(0, 50) +
+  ylim(0, 45)
+```
+
+
+## Run a Bayesian varying intercepts + varying slopes model (`rethinking`)
+
+Now, we can run the same model, but with a Bayesian approach.  This practice of setting priors for this kind of model gets _really_ weird, so it's worth having a look at Ch. 14 in the McElrath textbook to build some intuition around these.  I made my best attempt to describe what I think each prior is doing in the comments below, but I do not claim to be enough of a "math person" to have totally figured these out:
+
+```{r model_var_int_var_slope_bayes}
+fit_model3_bayes <- function() {
+
+  # Prep the data columns we want to pass the the model
+  dat_list <- list(
+    COMP_RATE_STND_HOURLY = hr_2019_top_25_job_classes$COMP_RATE_STND_HOURLY,
+    JOB_INDEX = hr_2019_top_25_job_classes$JOB_INDEX,
+    YRS_SINCE_ORIGINAL_HIRE = hr_2019_top_25_job_classes$YRS_SINCE_ORIGINAL_HIRE,
+    GENDER_INDEX = hr_2019_top_25_job_classes$GENDER_INDEX
+  )
+  
+  tic("Running model 3 Bayesian")
+  model3_bayes <- ulam(
+    alist(
+      COMP_RATE_STND_HOURLY ~ dnorm( mu , sigma ),
+      mu <- Intercept + a_job[JOB_INDEX] + a_gender[GENDER_INDEX] + (b_YRS_SINCE_ORIGINAL_HIRE + b_gender[GENDER_INDEX])*YRS_SINCE_ORIGINAL_HIRE,
+      
+      # population priors
+      Intercept ~ dnorm(30, 10),
+      sigma ~ dcauchy(0, 30),
+      
+      # fixed effects priors
+      b_YRS_SINCE_ORIGINAL_HIRE ~ dnorm(0.675, 1.5),
+      
+      # varying intercepts priors
+      a_job[JOB_INDEX] ~ dnorm(0, a_job_sigma), # prior for mean hourly starting salary of each group (after accounting for the "grand intercept" for the population as a whole): a normal distribution centered around 0
+      a_job_sigma ~ dcauchy(0, 50), # prior for the standard deviation of the mean hourly starting salary across groups
+      
+      # varying intercepts + slopes priors
+      c(a_gender, b_gender)[GENDER_INDEX] ~ multi_normal(0, Rho, sigma_gender), # we think intercepts and slopes are distributed along a multivariate normal distribution described by their correlation (Rho) and standard deviations
+      Rho ~ dlkjcorr(2), # prior for the correlation between slopes and intercepts within a group (see McElrath, p. 443 for a discussion of this prior)
+      sigma_gender ~ exponential(1) # ???
+    ),
+    data = dat_list, 
+    chains = 1,
+    log_lik = TRUE
+  )
+  
+  toc() # stop the timer
+  beepr::beep() # emit a beep so we can come back from whatever else we were doing
+  
+  saveRDS(model3_bayes, "./models/model3_bayes.rds")
+  return(model3_bayes)
+}
+
+if(file.exists("./models/model3_bayes.rds")) {
+  cat("Model has already been fit!  Loading results from disk.")
+  model3_bayes <- readRDS("./models/model3_bayes.rds")
+} else { 
+  cat("Model has not yet been fit. Fitting model now. Please be patient.")
+  model3_bayes <- fit_model3_bayes()
+}
+```
+
+And we can view the model results:
+
+```{r, warning=FALSE, message=FALSE, error=FALSE}
+precis(model3_bayes, depth=3)
+plot(precis(model3_bayes, depth=2), main="All Posterior Params")
+plot(precis(model3_bayes, depth=2, pars="a_job"), labels=JOB_LABELS, main="Job Intercepts")
+plot(precis(model3_bayes, depth=2, pars="a_gender"), labels=GENDER_LABELS, main="Gender Intercepts")
+plot(precis(model3_bayes, depth=2, pars="b_gender"), labels=GENDER_LABELS, main="Gender Slopes")
+```
+
+### Compare the Bayesian models
+
+We can run final comparison--this time across all of the Bayesian multilevel models we've fit so far.  We can see that model 3, which contains job intercepts + gender intercepts and slopes, has a _slightly_ lower WAIC value.  This doesn't, however, seem to be substantial for us to conclude that this "messy" gender variable adds a strong contribution to the model.
+
+```{r compare_bayes_models}
+compare(model2_bayes, model2_bayes_extreme_priors, model3_bayes)
+```
+
+
+## Conclusion
+
+I hope this has served as a useful crash course in the basic principles behind Bayesian regression and multilevel modeling for this kind of hierarchical regression task.  And above all, the intuition behind "pooling" and how you can leverage it to your advantage should be a key take-away of multilevel modeling.  You may find it useful to start considering whether multilevel should become your default choice--particularly when faced with modeling situations that involve nested or hierarchical data.  Let's sum things up with a pity quote from _Statistical Rethinking_:
+
+> "Every model is a merger of sense and nonsense. When we understand a model, we can find its sense and control its nonsense." ~ McElreath, p. 426
+
+
+
+

@@ -1,0 +1,207 @@
+---
+title: "MN Public Salary Data - Multilevel Models"
+subtitle: "Part 1: Fixed effects Bayesian model"
+author: "Alison Link"
+output: html_notebook
+---
+
+```{r load_libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+# Install the `rethinking` package:
+# devtools::install_github("rmcelreath/rethinking")
+library(rethinking) 
+```
+
+
+It's easy to get pretty far learning R and basic statistical analysis without really encountering the concept of multilevel modeling. (At least, that's been the case for me.)  This is unfortunate, because **multilevel modeling can be a useful tool when data generating processes are hierarchical in nature--a situation which can be quite common in social, ecological, and political systems**.  This tutorial came about as part of a personal resolution to explore some of the Bayesian and multilevel modeling techniques and philosophies discussed in the book [_Statistical Rethinking_](https://www.routledge.com/Statistical-Rethinking-A-Bayesian-Course-with-Examples-in-R-and-STAN/McElreath/p/book/9780367139919) by Richard McElreath.  (Because, what better way to try to learn something than to commit to writing a tutorial about it?)  As someone who is more of a social scientist by nature, I tend to be more interested in gaining intuition around concepts versus "learning all the math", so this tutorial is written with that framing.  I unfortunately can't claim to understand _all_ of the math--yet.  ;-)  The goals are as follows:
+
+- Gain basic familiarity with Bayesian modeling principles
+- Learn about multilevel modeling and why it can be a useful tool
+- Look at how these concepts can be applied to a [public salaries dataset on Minnesota state employees](https://mn.gov/mmb/transparency-mn/payrolldata.jsp). (Yay open data!)
+
+In **Part 1**, we'll perform some modeling on the Minnesota public employees salaries data within a Bayesian framework, using the syntax and approach introduced by McElreath in his book _Statistical Rethinking_ (2nd Edition).  This syntax is quite different from the regression formulas you're probably used to using in R, so it's worth taking some time to understand the syntax and how to leverage it to give your regressions some of that exciting "Bayesian" flavor.
+
+In **Parts 2 and 3**, we'll look at how to approach this data through a multilevel modeling lens.  At the risk of sounding like an infomercial, let's just say that multilevel modeling is the coolest tool you probably never realized you needed...until now!  Multilevel models are, first and foremost, an elegantly intuitive way of modeling hierarchical or "nested" data generating processes.  Not only that, but multilevel models can actually be better at performing the bias-variance tradeoff that is the crux of a modeler's woes!  They are good at weighing how much information to share across different groups within a model, which gives them a built-in regularizing effect.  This phenomenon is called **pooling**, where "each separate [group] in the model provides information that can be used to improve the estimates for all other [groups]" (McElrath, p. 405).  As we go along, we'll explore two different packages that empower different approaches to multilevel modeling: 
+
+- **lmer (lme4/lmerTest)** 
+  - Pros: Popular multilevel modeling package for R. Formula syntax similar to `lm`/`glm` functions. 
+  - Cons: Not Bayesian
+- **rethinking** 
+  - Pros: Bayesian. Allows you to specify priors for all the things.
+  - Cons: Can be hard to install. Takes forever to fit.
+
+When illustrating multilevel modeling approaches, we'll always start with `lmer` models first to help get insights into the multilevel nature of the data.  `lmer` is better for getting our feet wet, because the syntax is much more intuitive for a user who is used to R model formulas, and the models themselves are fast to run.  When we're comfortable with the basic concepts, we will take a brief foray into the Bayesian version of these models, which feature more complex syntax and are more computationally intensive to run.
+
+Multilevel models perform an intriguing and delicate dance, estimating not only how observations vary _within_ each group, but also how groups themselves vary _across_ the context of all of the other groups in the population.  By the end of this tutorial, you'll hopefully start to agree that:
+
+> When it comes to regression, multilevel regression deserves to be the default approach. There are certainly contexts in which it would be better to use an old-fashioned single-level model. But the contexts in which multilevel models are superior are much more numerous. It is better to begin to build a multilevel analysis, and then realize it's unnecessary, than to overlook it. ~ McElreath, p. 400
+
+
+***
+
+## Fixed effects Bayesian model (for comparison)
+
+Before we tackle multilevel models, let's get used to the data, the syntax, and the Bayesian-ness of it all by running a very basic model.  The main question we want to tackle in this model is: **Are state employees' wages systematically related to how many years they have worked for the state?**  For this analysis, let's restrict our focus to the 25 most common jobs among state employees, just to keep things easier to visualize, and to make sure we have sufficient data from each job class.  Here are the "top 25" jobs, along with the counts occupied by each gender.
+
+```{r top_25_jobs, warning=FALSE, message=FALSE}
+top_25_job_classes <- hr_2019 %>%
+  group_by(JOB_TITLE) %>%
+  summarise(distinct_employees = length(unique(UNIQUE_ID))) %>%
+  arrange(desc(distinct_employees)) %>%
+  top_n(25) %>% select(JOB_TITLE)
+
+top_25_job_classes <- top_25_job_classes$JOB_TITLE
+
+hr_2019 %>%
+  filter(JOB_TITLE %in% top_25_job_classes) %>%
+ggplot(., aes(x=JOB_TITLE, fill=GENDER)) +
+  geom_bar(position="stack", stat="count") +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1))
+```
+
+Let's filter the dataset to focus on these job classes only, leaving us with 16,715 observations:
+
+```{r filter_top25_jobs}
+hr_2019_top_25_job_classes <- hr_2019 %>%
+  filter(JOB_TITLE %in% top_25_job_classes)
+```
+
+While we're at it, let's also turn job class into both a factor and an index variable.  These are two representations of the same information--we'll just use them slightly differently down the road, depending on which modeling approach we're using:
+
+```{r transform_job_factor}
+hr_2019_top_25_job_classes$JOB_FACTOR <- relevel(as.factor(hr_2019_top_25_job_classes$JOB_TITLE), ref="State Patrol Trooper")
+hr_2019_top_25_job_classes$JOB_INDEX <- as.integer(hr_2019_top_25_job_classes$JOB_FACTOR)
+
+JOB_LABELS <- levels(hr_2019_top_25_job_classes$JOB_FACTOR)
+```
+
+For the sake of this particular exploration, we _will not_ standardize or log scale the data, as this helps make coefficients and their units more directly interpretable at each step.  This is something that we'd want to explore if we were doing this analysis beyond didactic reasons, but it can add an additional hurdle to interpreting model results that we'd prefer to avoid while we're learning.
+
+
+### Pick priors
+
+Before running the model, we need to pick three **priors**.  Priors are simply a "starting theory", informed by information _outside_ of your target dataset, about what range of parameter values seem plausible for your modeling task.  Before you get too worried about picking priors, note that these are simply a _starting_ theory--they will ultimately be combined with the empirical evidence from the data itself before your model lands on its final, **posterior** theory.  Don't feel like you know enough to pick good priors?  That's not a huge problem--you can err on the side of picking "wider" priors and allow the evidence of the data to do more of the heavy lifting.  (See: McElreath, p. 82 for a discussion on the thought process of picking these kinds of priors.)  For this modeling task, however, a little basic research can give us some pretty decent priors:
+
+1. **Prior for mean hourly wage:** For this prior, we can use the [Bureau of Labor Statistic's data](https://www.bls.gov/regions/midwest/news-release/occupationalemploymentandwages_minneapolis.htm) on the mean hourly wage for the Twin Cities metro area, which was ~$27 per hour in 2018.  We'll round that to \$30 per hour, and set the standard deviation for this prior (chosen somewhat arbitrarily) to \$10.  (Because it seems likely that the mean hourly wage for an average Minnesota state employee would roughly mirror the overall mean hourly wage for the state across all employment sectors, and wouldn't be more than +/-\$10 in either direction.)
+
+2. **Prior for the standard deviation across hourly wages:** For this prior, let's think about a reasonable range that we believe ~90% of hourly salaries are likely to lie within.  On the low end, we would have minimum wage workers, who make approximately ~\$10 per hour [according to Minnesota law](https://www.dli.mn.gov/business/employment-practices/minimum-wage-minnesota).  On the high end, we can think of the types of high-paying jobs that the state tends to employ (ex: lawyers, upper-level personnel managers, IT managers, etc.).  Looking at [this Business Insider article](https://www.businessinsider.com/hourly-salaries-surgeons-lawyers-2016-9) as an external information source, we can get a ballpark hourly wage for these kinds of roles to help us get a sense of the upper end of the spectrum.  It looks like many of these roles are somewhere in the ~\$70 per hour range. So, that establishes our 90% range as \$10 - 70 per hour, for a total span of \$60.  The 90% range represents ~3 standard deviations around the mean, so we can divide our range by 3 to yield 1 standard deviation, or $20 as our prior for the standard deviation.
+
+3. **Prior for the average increase in hourly wages for each additional year that the individual has worked for the state:**  One bit of information we can use to inform this prior is the fact that the vast majority of Minnesota public employees are represented by labor bargaining units.  So for this prior, we can do a little digging into the bargaining units.  It looks like the MN Association of Professional Employees is the largest single bargaining unit for state employees.  In [their most recent wage contract](https://mape.org/mapes-contract-working/article-24-wages), it states that employees are subject to a first- and second-year wage adjustment stipulating that "all salary ranges and rates for classes covered in this Agreement shall be increased by two and one-quarter percent (2.25%)".  Assuming a similar arrangement was in effect for prior contracts, then for an average worker making ~\$30 per hour, we could expect an annual hourly wage increase of: `30 * 0.0225 =` `r 30 * 0.0225`.  We will use this as our prior for the beta coefficient representing the mean annual hourly compensation rate increase for each additional year worked at the state.  It also seems like it would be highly unusual for employees to see an annual absolute change in their hourly compensation rate that is more extreme than 5% in either direction from the expected mean annual increase.  We'll set \$1.5 as the standard deviation for this prior, which is the equivalent of assuming that most (95%) of the time, employees will experience a fluctuation in compensation rate that is between -5% and +5%.  This is the prior that we know least about, so it's okay to keep it "wide" for now and let the data persuade the model to adjust as necessary.
+
+```{r view_bargaining_unit, eval = FALSE}
+hr_2019 %>% 
+  group_by(BARGAINING_UNIT_NAME) %>% 
+  summarise(count_of_distinct_employees = length(unique(UNIQUE_ID))) %>%
+  arrange(desc(count_of_distinct_employees)) %>%
+  top_n(5)
+```
+
+We can now visualize each of these priors to get a better sense of how they are "grounding" our model:
+
+```{r view_priors, warnings=FALSE}
+par(mfrow=c(1,3))
+curve(dnorm(x, 30, 10), from=0, to=80, main="Mean hourly wage")
+curve(dcauchy(x, 0, 20), from=0, to=40, main="St dev across hourly wage")
+curve(dnorm(x, 0.675, 1.5), from=-3, to=5, main="Avg annual increase in hourly wage")
+```
+
+
+### Run the model with specified priors
+
+Now we can run the Bayesian regression.  You will need to have the `rethinking` library installed and loaded.  Basic Bayesian regressions like this one can be fit using the `quap()` function from that package.  The function expects two arguments: 1) an `alist` object containing the model formula, and 2) the data it should be run against.  The model formula is pretty verbose; see the comments below to understand what each line is doing:
+
+```{r run_bayes_model}
+model1 <- quap(
+  alist(
+    COMP_RATE_STND_HOURLY ~ dnorm( mu , sigma ), # the response variable, which we believe comes from a normal distribution centered around mu with standard deviation sigma
+    mu <- Intercept + b_YRS_SINCE_ORIGINAL_HIRE*YRS_SINCE_ORIGINAL_HIRE, # the 'meat' of the model--the formula that describes how the explanatory variables come together to influence the response variable 
+    Intercept ~ dnorm(30, 10), # prior for mean hourly wage
+    b_YRS_SINCE_ORIGINAL_HIRE ~ dnorm(0.675, 1.5), # prior for average increase in hourly wages for each additional year worked for the state
+    sigma ~ dcauchy(0, 20) # prior for standard deviation across hourly wages (i.e. the remaining error after accounting for years worked for the state)
+  ),
+  data = hr_2019_top_25_job_classes
+)
+```
+
+We can use the `precis()` function to view the model summary:
+
+```{r}
+precis(model1) # view the model summary
+plot(precis(model1)) # plot the coefficients and their "credible intervals" (See: McElreath, p. 54 for discussion on "credible interval" terminology)
+```
+
+
+### Run the model with default priors
+
+What if we got lazy about doing our background research and simply decided to use the priors that the `rethinking` package assigns by default?  We can easily give that a try and see how much it affects the modeling results.  Here's a visualization of the default priors--you can see that these are pretty nonsensical.  For example, the prior for the mean hourly wage makes it look like we're we're just as likely to have employees making _negative_ wages as we are to see positive wages.  And the prior for the standard deviation across wages makes it seem highly unusual to see wages that are +/- \$4 from the mean in either direction, when we know from our Business Insider research above that the wage range should actually be quite wide between minimum-wage hourly workers to higher-level executives.  Will these default priors mess up the model?
+
+```{r show_default_priors, warnings=FALSE}
+par(mfrow=c(1,3))
+curve(dnorm(x, 0, 10), from=-15, to=15, main="Mean hourly wage")
+curve(dcauchy(x, 0, 2), from=0, to=5, main="St dev across hourly wages")
+curve(dnorm(x, 0, 10), from=-15, to=15, main="Avg annual increase in hourly wage")
+```
+
+To find out, we'll fit the same model, but this time allowing it to pick the default priors instead of our carefully-selected priors above.  This time, we'll also demonstrate the use of the `glimmer` function, which allows you to specify the model formula using syntax that will seem more familiar to users who are used to the `lm` and `glm` packages.  This amounts to running the exact same model as above, just using different (default) priors.  And surprisingly, when we look at the `precis()` output, the results of this model--despite the nonsensical priors--are shockingly similar to the first model we ran!
+
+```{r run_bayes_model_default}
+model1_default_priors_params <- glimmer(COMP_RATE_STND_HOURLY ~ YRS_SINCE_ORIGINAL_HIRE, data = hr_2019_top_25_job_classes)
+
+model1_default_priors <- quap(model1_default_priors_params$f, model1_default_priors_params$d) # pass in two arguments: the function (f) and the data (d) from the parameter list defined by glimmer above
+```
+
+```{r}
+precis(model1_default_priors)
+plot(precis(model1_default_priors))
+```
+
+How can this be?  We have _a lot_ of data going into the model, so it's actually the data--and _not_ the priors--that is doing the bulk of the work here.  The data itself is overwhelmingly convincing that the intercept (i.e. the mean hourly wage) is somewhere around \$25.  I also appears that employees' hourly salaries increase somewhere around 25 cents for every additional year they have worked for the state.  And it appears that the standard deviation across wages likely lies somewhere around \$9.2.
+
+
+### Run the model with extreme priors
+
+We have seen that, with enough data, our model can still prevail over nonsensical priors.  Now, the question remains: can we "trick" the model into behaving badly if we give it _really really bad_ priors?  It turns out that wide, flat priors are unlikely to mess up the model very much, as the data can easily persuade these priors in the right direction.  To be _truly_ diabolical, we need to give it very narrow priors.  Let's do our best to thwart the model with the following priors:
+
+```{r show_extreme_priors, warnings=FALSE}
+par(mfrow=c(1,3))
+curve(dnorm(x, -30, 1), from=-35, to=0, main="Mean hourly wage")
+curve(dcauchy(x, 0, 0.001), from=0, to=1, main="St dev across hourly wages")
+curve(dnorm(x, -5, 1), from=-15, to=15, main="Avg annual increase in hourly wage")
+```
+We run the model with these extreme priors, and...
+
+```{r run_bayes_model_extreme}
+model1_extreme_priors <- quap(
+  alist(
+    COMP_RATE_STND_HOURLY ~ dnorm( mu , sigma ),
+    mu <- Intercept + b_YRS_SINCE_ORIGINAL_HIRE*YRS_SINCE_ORIGINAL_HIRE,
+    Intercept ~ dnorm(-30, 1), # prior for mean hourly wage
+    b_YRS_SINCE_ORIGINAL_HIRE ~ dnorm(-5, 1), # prior for average increase in hourly wages for each additional year worked for the state
+    sigma ~ dcauchy(0, 0.001) # prior for standard deviation across hourly wages
+  ),
+  data = hr_2019_top_25_job_classes
+)
+
+precis(model1_extreme_priors)
+
+plot(precis(model1_extreme_priors))
+```
+
+...the model still triumphs!  The posterior parameter values are remarkably similar to the first two models, despite having used quite extreme priors this time around.  This means that the evidence contained in the data is convincing enough to pull the posterior back to what we believe is closer to its "true" values!
+
+**Bonus challenge quest:** Try to mess with the model even more by using even _more_ extreme priors.  At what point do the priors overwhelm the evidence of the data and manage to skew the model in the wrong direction?
+
+
+## Compare the models
+
+We want to pay particular attention to two values here: 
+
+1. The **WAIC value**, which is a more general version of the AIC metric, which estimates the out-of-sample predication error for a model.  This allows us to compare across models to assess their goodness of fit.  A lower WAIC represents a "better" model. 
+
+2. The **pWAIC value**, which is a measure of the number of effective parameters in the model.  These are "effective" parameters--not a literal count of all of the parameters.  For these simple models, which all have the same basic structure, we don't see a huge difference in the pWAIC values across models.  For more complex models, for example when you're comparing various different multilevel modeling architectures, you'll likely notice a bigger difference between the pWAIC values for different modeling approaches.  
+
+```{r}
+compare(model1, model1_default_priors, model1_extreme_priors)
+```
+
